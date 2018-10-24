@@ -1,0 +1,61 @@
+import json,boto3,gzip,datetime,urllib
+def lambda_handler(event, context):
+    
+    #create date strings
+    year_str = datetime.datetime.today().strftime('%Y')
+    month_str = datetime.datetime.today().strftime('%m')
+    day_str = datetime.datetime.today().strftime('%d')
+    
+    #get last 50 objects from cloudtrail bucket
+    client = boto3.client('s3')
+    response = client.list_objects_v2(
+        Bucket='my-cloudtrail-bucket',
+        Prefix='AWSLogs/awsid/CloudTrail/us-west-2/'+year_str+'/'+month_str+'/',
+    )
+    s3objects = response['Contents'][-50:]
+    
+    #parse object keys
+    keys = []
+    for s3object in s3objects:
+        keys.append(s3object['Key'])
+    
+    coors = []
+    last_coor = []
+    for key in keys:
+        dt = datetime.datetime.today().strftime('%Y%m%d%H%M%S')
+        #download key to be able to read encoded contents
+        response = client.download_file('my-cloudtrail-bucket',key,'/tmp/'+dt+'.gz')
+        with gzip.open('/tmp/'+dt+'.gz', 'rb') as f:
+            file_content = f.read()
+        data=json.loads(file_content)
+        #insert try to catch objects without coordinates
+        try:
+            for record in data['Records']:
+                #parse coordinates
+                lng = record['requestParameters']['longitude']
+                lat = record['requestParameters']['lat']
+                #skip repeats
+                new_coor = [round(float(lng.encode("utf-8")),3),round(float(lat.encode("utf-8")),3)]
+                if new_coor == last_coor:
+                    z=null
+                else:
+                    coors.append(new_coor)
+                last_coor = new_coor
+        except:
+            pass
+    #build geojson object    
+    geojson_data = '{"type": "Feature","geometry": {"type": "LineString","coordinates":'
+    geojson_data += json.dumps(coors)
+    geojson_data += '},"properties": {"name": "route data"}}'
+    
+    #create geojson.io url string
+    url = 'http://geojson.io/#data=data:application/json,'
+    url += urllib.pathname2url(geojson_data)
+    
+    #put geojson.io url to s3
+    response = client.put_object(
+        Bucket='my-gps-location',
+        Key='index.html',
+        ACL='public-read',
+        WebsiteRedirectLocation=url
+    )
